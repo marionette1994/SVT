@@ -2,6 +2,7 @@
   "name": "SV 戦績トラッカー",
   "short_name": "SV戦績",
   "description": "Shadowverse: Worlds Beyond の戦績管理アプリ",
+  "id": "./?app=svt2",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
