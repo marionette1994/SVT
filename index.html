@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SV戦績" />
+  <title>SV戦績トラッカー</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; background: #0a0a0f; color: #ddd;
+      font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+    body { padding-bottom: env(safe-area-inset-bottom); }
+    input, select, button, textarea { font-family: inherit; }
+    input:focus, textarea:focus { outline: 1px solid #c9a84c; }
+    ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+    #boot { display:flex; align-items:center; justify-content:center; height:100vh; color:#c9a84c; font-size:13px; }
+  </style>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"><div id="boot">読み込み中…</div></div>
+
+  <script>
+    /* window.storage シム（localStorage） */
+    window.storage = {
+      async get(k){ const v = localStorage.getItem(k); return v == null ? null : { value: v }; },
+      async set(k, v){ localStorage.setItem(k, v); return true; },
+      async delete(k){ localStorage.removeItem(k); return true; },
+    };
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
+    }
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    /* ── 定数 ── */
+    const APP_VER = "6.0";
+    const CLASSES = [
+      { id:"elf",    name:"エルフ",     color:"#3d9e4f", bg:"#1a3d22", icon:"🌿" },
+      { id:"royal",  name:"ロイヤル",   color:"#4a7fd4", bg:"#1a2a4a", icon:"⚔️" },
+      { id:"witch",  name:"ウィッチ",   color:"#9b59d0", bg:"#2a1a40", icon:"🔮" },
+      { id:"dragon", name:"ドラゴン",   color:"#e05a2b", bg:"#3d1a0d", icon:"🐉" },
+      { id:"vamp",   name:"ナイトメア", color:"#c0392b", bg:"#3d0d0d", icon:"🦇" },
+      { id:"bishop", name:"ビショップ", color:"#d4a417", bg:"#3d2d00", icon:"✨" },
+      { id:"nemesis",name:"ネメシス",   color:"#1abc9c", bg:"#0d3028", icon:"⚙️" },
+    ];
+    const cls = id => CLASSES.find(c => c.id === id);
+    const GOLD = "#c9a84c";
+    const MK = "sv4-m", DK = "sv4-d", SK = "sv4-s";
+
+    /* ── ストレージ ── */
+    async function load(k){
+      try { const r = await window.storage.get(k); return r && r.value ? JSON.parse(r.value) : []; }
+      catch { return []; }
+    }
+    async function save(k, v){
+      try { await window.storage.set(k, JSON.stringify(v)); return true; }
+      catch(e){ alert("保存に失敗しました（容量不足の可能性）。\nスクショ画像を減らすか、CSVでバックアップしてください。"); return false; }
+    }
+
+    /* ── 画像圧縮（最大900px / JPEG 75%） ── */
+    function compress(file){
+      return new Promise((ok, ng) => {
+        const fr = new FileReader();
+        fr.onerror = ng;
+        fr.onload = ev => {
+          const img = new Image();
+          img.onerror = ng;
+          img.onload = () => {
+            const s = Math.min(1, 900 / img.width);
+            const w = Math.round(img.width * s), h = Math.round(img.height * s);
+            const c = document.createElement("canvas");
+            c.width = w; c.height = h;
+            c.getContext("2d").drawImage(img, 0, 0, w, h);
+            ok(c.toDataURL("image/jpeg", 0.75));
+          };
+          img.src = ev.target.result;
+        };
+        fr.readAsDataURL(file);
+      });
+    }
+
+    /* ── 日時 ── */
+    const pad = n => String(n).padStart(2, "0");
+    function fmtTs(ts){
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    function fmtShort(ts){
+      const d = new Date(ts);
+      return `${d.getMonth()+1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    function parseTs(s){
+      if (!s) return new Date().toISOString();
+      const m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+      const d = m ? new Date(+m[1], +m[2]-1, +m[3], +(m[4]||0), +(m[5]||0), +(m[6]||0)) : new Date(s);
+      return isNaN(d) ? new Date().toISOString() : d.toISOString();
+    }
+    const today = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+
+    /* ── CSV ── */
+    const CSV_HEADER = ["日時","シリーズ","結果","先攻後攻","自分のデッキ","自分のクラス","相手のクラス","相手のデッキタイプ"];
+
+    function downloadCSV(matches, series, filter){
+      let list = matches, label = "all";
+      if (filter === "none") { list = matches.filter(m => !m.seriesId); label = "未指定"; }
+      else if (filter !== "all") {
+        list = matches.filter(m => m.seriesId === filter);
+        label = series.find(s => s.id === filter)?.name || "series";
+      }
+      list = [...list].sort((a,b) => new Date(a.ts) - new Date(b.ts));
+      const esc = v => `"${String(v ?? "").replace(/"/g,'""')}"`;
+      const rows = list.map(m => [
+        fmtTs(m.ts),
+        series.find(s => s.id === m.seriesId)?.name || "",
+        m.result === "win" ? "勝利" : "敗北",
+        m.order === "first" ? "先攻" : "後攻",
+        m.deckName || "",
+        cls(m.myClass)?.name || "",
+        cls(m.oppClass)?.name || "",
+        m.oppType || "",
+      ].map(esc).join(","));
+      const csv = "﻿" + [CSV_HEADER.map(esc).join(","), ...rows].join("\r\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const safe = label.replace(/[\\/:*?"<>|]/g, "_");
+      a.href = url; a.download = `shadowverse_${safe}_${today()}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return list.length;
+    }
+
+    function parseCSV(text){
+      text = text.replace(/^﻿/, "");
+      const rows = []; let row = [], cur = "", q = false;
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (q) {
+          if (ch === '"') { if (text[i+1] === '"') { cur += '"'; i++; } else q = false; }
+          else cur += ch;
+        } else {
+          if (ch === '"') q = true;
+          else if (ch === ",") { row.push(cur); cur = ""; }
+          else if (ch === "\n" || ch === "\r") {
+            if (ch === "\r" && text[i+1] === "\n") i++;
+            row.push(cur); cur = "";
+            if (row.some(c => c !== "")) rows.push(row);
+            row = [];
+          } else cur += ch;
+        }
+      }
+      row.push(cur);
+      if (row.some(c => c !== "")) rows.push(row);
+      return rows;
+    }
+
+    function importCSV(text, existing, mode){
+      const rows = parseCSV(text);
+      if (rows.length < 2) return { error: "CSVが空、または不正です" };
+      const header = rows[0].map(s => s.trim());
+      const idx = {}; CSV_HEADER.forEach(h => idx[h] = header.indexOf(h));
+      if (idx["日時"] < 0 || idx["結果"] < 0 || idx["自分のクラス"] < 0 || idx["相手のクラス"] < 0)
+        return { error: "CSVのヘッダーが不正です。\nこのアプリで出力したCSVを使用してください。" };
+
+      const name2id = n => CLASSES.find(c => c.name === n)?.id || null;
+      const base = mode === "replace" ? { matches:[], decks:[], series:[] } : existing;
+      const series = [...base.series], decks = [...base.decks], matches = [...base.matches];
+      const sByName = new Map(series.map(s => [s.name, s]));
+      const dBySig = new Map(decks.map(d => [`${d.name}|${d.classId}|${d.seriesId}`, d]));
+      const sigs = new Set(matches.map(m => `${fmtTs(m.ts)}|${m.deckName}|${m.oppClass}|${m.result}|${m.order}`));
+      let seq = Date.now(), added = 0, skipped = 0, newS = 0, newD = 0;
+      const errors = [];
+
+      rows.slice(1).forEach((row, i) => {
+        const get = k => idx[k] >= 0 ? (row[idx[k]] || "").trim() : "";
+        const myClass = name2id(get("自分のクラス")), oppClass = name2id(get("相手のクラス"));
+        if (!myClass || !oppClass) { errors.push(`行${i+2}: クラス名が不明`); return; }
+        const r = get("結果");
+        const result = r === "勝利" ? "win" : r === "敗北" ? "loss" : null;
+        if (!result) { errors.push(`行${i+2}: 結果が不明（${r}）`); return; }
+        const order = get("先攻後攻") === "先攻" ? "first" : "second";
+
+        let seriesId = null;
+        const sName = get("シリーズ");
+        if (sName) {
+          let s = sByName.get(sName);
+          if (!s) { s = { id: "s" + (seq++), name: sName }; series.push(s); sByName.set(sName, s); newS++; }
+          seriesId = s.id;
+        }
+        const deckName = get("自分のデッキ") || cls(myClass).name;
+        let deck = dBySig.get(`${deckName}|${myClass}|${seriesId}`);
+        if (!deck) {
+          deck = { id: "d" + (seq++), name: deckName, classId: myClass, seriesId, img: null };
+          decks.push(deck); dBySig.set(`${deckName}|${myClass}|${seriesId}`, deck); newD++;
+        }
+        const ts = parseTs(get("日時"));
+        const sig = `${fmtTs(ts)}|${deckName}|${oppClass}|${result}|${order}`;
+        if (sigs.has(sig)) { skipped++; return; }
+        sigs.add(sig);
+        matches.push({ id: "m" + (seq++), ts, seriesId, result, order,
+          deckId: deck.id, deckName, myClass, oppClass, oppType: get("相手のデッキタイプ") });
+        added++;
+      });
+      matches.sort((a,b) => new Date(b.ts) - new Date(a.ts));
+      return { matches, decks, series, added, skipped, newS, newD, errors };
+    }
+
+    /* ── 集計ヘルパ ── */
+    const winsOf = list => list.filter(m => m.result === "win").length;
+    const pct = (w, t) => t ? Math.round(w / t * 100) : null;
+    const wrColor = p => p == null ? "#555" : p >= 60 ? "#4caf7a" : p >= 50 ? GOLD : p >= 40 ? "#d48a3a" : "#c0392b";
+
+    /* ── 小コンポーネント ── */
+    function Lbl({ txt, required }){
+      return <div style={{ fontSize:10, color:"#777", margin:"0 0 6px", letterSpacing:1 }}>
+        {txt}{required && <span style={{ color:"#c0392b", marginLeft:4 }}>*</span>}
+      </div>;
+    }
+    function WR({ w, t, size=13 }){
+      const p = pct(w, t);
+      return <span style={{ fontSize:size, fontWeight:700, color:wrColor(p), minWidth:40, textAlign:"right", display:"inline-block" }}>
+        {p == null ? "—" : p + "%"}
+      </span>;
+    }
+    function Bar({ w, t }){
+      const p = pct(w, t) || 0;
+      return <div style={{ height:4, background:"#1a1a22", borderRadius:2, overflow:"hidden", marginTop:5 }}>
+        <div style={{ width:p+"%", height:"100%", background:wrColor(t ? p : null) }} />
+      </div>;
+    }
+    function Chip({ sel, onClick, children, color=GOLD, bg }){
+      return <button onClick={onClick} style={{
+        padding:"6px 11px", borderRadius:20, fontSize:11, cursor:"pointer",
+        border:`1px solid ${sel ? color : "#222"}`, background: sel ? (bg || color+"22") : "#0f0f14",
+        color: sel ? color : "#777", whiteSpace:"nowrap",
+      }}>{children}</button>;
+    }
+    function ClassGrid({ value, onChange }){
+      return <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:6 }}>
+        {CLASSES.map(c => {
+          const sel = value === c.id;
+          return <button key={c.id} onClick={() => onChange(c.id)} style={{
+            padding:"9px 2px", borderRadius:9, cursor:"pointer", fontSize:10,
+            border:`1px solid ${sel ? c.color : "#1e1e26"}`, background: sel ? c.bg : "#0f0f14",
+            color: sel ? c.color : "#777", display:"flex", flexDirection:"column", alignItems:"center", gap:3,
+          }}><span style={{ fontSize:17 }}>{c.icon}</span>{c.name}</button>;
+        })}
+      </div>;
+    }
+    function Card({ children, style }){
+      return <div style={{ background:"#111118", border:"1px solid #1c1c24", borderRadius:12, padding:12, marginBottom:10, ...style }}>{children}</div>;
+    }
+    function Section({ title, children, right }){
+      return <div style={{ marginBottom:18 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+          <div style={{ fontSize:12, color:GOLD, fontWeight:700, letterSpacing:1 }}>{title}</div>{right}
+        </div>
+        {children}
+      </div>;
+    }
+    const inputStyle = { width:"100%", padding:"10px 12px", borderRadius:9, border:"1px solid #222",
+      background:"#0f0f14", color:"#ddd", fontSize:14 };
+    const btn = (bg, color="#fff") => ({ padding:"10px 14px", borderRadius:9, border:"none", background:bg,
+      color, fontSize:13, fontWeight:700, cursor:"pointer" });
+
+    function Toast({ msg }){
+      if (!msg) return null;
+      return <div style={{ position:"fixed", left:"50%", bottom:90, transform:"translateX(-50%)", zIndex:50,
+        background:"#1d1a10", border:`1px solid ${GOLD}`, color:GOLD, padding:"9px 16px", borderRadius:20,
+        fontSize:12, boxShadow:"0 4px 20px #0008", whiteSpace:"pre-line", textAlign:"center" }}>{msg}</div>;
+    }
+
+    function ImgModal({ src, onClose }){
+      if (!src) return null;
+      return <div onClick={onClose} style={{ position:"fixed", inset:0, background:"#000d", zIndex:60,
+        display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+        <img src={src} style={{ maxWidth:"100%", maxHeight:"100%", borderRadius:8 }} />
+      </div>;
+    }
+
+    /* ══════════════ App ══════════════ */
+    function App(){
+      const [ready, setReady] = useState(false);
+      const [matches, setMatches] = useState([]);
+      const [decks, setDecks] = useState([]);
+      const [series, setSeries] = useState([]);
+      const [tab, setTab] = useState("rec");
+      const [toast, setToast] = useState("");
+      const [modalImg, setModalImg] = useState(null);
+      const toastT = useRef();
+
+      useEffect(() => { (async () => {
+        setMatches(await load(MK)); setDecks(await load(DK)); setSeries(await load(SK)); setReady(true);
+      })(); }, []);
+
+      const notify = m => { setToast(m); clearTimeout(toastT.current); toastT.current = setTimeout(() => setToast(""), 2200); };
+      const saveM = v => { setMatches(v); save(MK, v); };
+      const saveD = v => { setDecks(v); save(DK, v); };
+      const saveS = v => { setSeries(v); save(SK, v); };
+
+      if (!ready) return <div id="boot">読み込み中…</div>;
+
+      const last20 = matches.slice(0, 20);
+      const TABS = [["rec","記録","✍️"],["hist","履歴","📜"],["stats","統計","📊"],["decks","デッキ","🃏"],["set","設定","⚙️"]];
+
+      return <div style={{ maxWidth:560, margin:"0 auto", minHeight:"100vh", paddingBottom:80 }}>
+        {/* ヘッダー */}
+        <div style={{ position:"sticky", top:0, zIndex:10, background:"linear-gradient(#0a0a0f, #0a0a0fee)",
+          padding:"calc(env(safe-area-inset-top) + 12px) 16px 10px", borderBottom:"1px solid #1a1a22" }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+            <div>
+              <div style={{ fontSize:15, fontWeight:800, color:GOLD, letterSpacing:1 }}>⚔ SV 戦績トラッカー</div>
+              <div style={{ fontSize:9, color:"#555", marginTop:2 }}>Shadowverse: Worlds Beyond</div>
+            </div>
+            <div style={{ textAlign:"right" }}>
+              <div style={{ fontSize:9, color:"#666" }}>直近{last20.length}戦</div>
+              <div style={{ fontSize:13 }}>
+                <span style={{ color:"#aaa" }}>{winsOf(last20)}勝{last20.length - winsOf(last20)}敗 </span>
+                <WR w={winsOf(last20)} t={last20.length} size={15} />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ padding:"14px 16px" }}>
+          {tab === "rec"   && <RecordTab {...{ matches, decks, series, saveM, notify, setTab }} />}
+          {tab === "hist"  && <HistoryTab {...{ matches, decks, series, saveM, notify }} />}
+          {tab === "stats" && <StatsTab {...{ matches, series }} />}
+          {tab === "decks" && <DecksTab {...{ matches, decks, series, saveD, notify, setModalImg }} />}
+          {tab === "set"   && <SettingsTab {...{ matches, decks, series, saveM, saveD, saveS, notify }} />}
+        </div>
+
+        {/* タブバー */}
+        <div style={{ position:"fixed", bottom:0, left:0, right:0, zIndex:20, background:"#0d0d12",
+          borderTop:"1px solid #1c1c24", paddingBottom:"env(safe-area-inset-bottom)" }}>
+          <div style={{ maxWidth:560, margin:"0 auto", display:"flex" }}>
+            {TABS.map(([id, label, ic]) => (
+              <button key={id} onClick={() => setTab(id)} style={{ flex:1, padding:"9px 0 8px", background:"none",
+                border:"none", cursor:"pointer", color: tab === id ? GOLD : "#555", fontSize:10,
+                display:"flex", flexDirection:"column", alignItems:"center", gap:2,
+                borderTop: `2px solid ${tab === id ? GOLD : "transparent"}` }}>
+                <span style={{ fontSize:17, filter: tab === id ? "none" : "grayscale(1) opacity(.6)" }}>{ic}</span>{label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <Toast msg={toast} />
+        <ImgModal src={modalImg} onClose={() => setModalImg(null)} />
+      </div>;
+    }
+
+    /* ══════════════ 記録タブ ══════════════ */
+    function useLastSeries(series){
+      const [sid, setSid] = useState(() => {
+        try { const v = localStorage.getItem("sv4-lastSeries"); if (v && series.some(s => s.id === v)) return v; } catch {}
+        return series.length ? series[series.length - 1].id : null;
+      });
+      useEffect(() => {
+        if (sid && !series.some(s => s.id === sid)) setSid(series.length ? series[series.length-1].id : null);
+      }, [series]);
+      const set = v => { setSid(v); try { localStorage.setItem("sv4-lastSeries", v); } catch {} };
+      return [sid, set];
+    }
+
+    function OppTypePicker({ value, onChange, oppClass, seriesId, matches }){
+      const types = useMemo(() => {
+        const cnt = {};
+        matches.filter(m => m.seriesId === seriesId && m.oppClass === oppClass && m.oppType)
+          .forEach(m => cnt[m.oppType] = (cnt[m.oppType] || 0) + 1);
+        return Object.entries(cnt).sort((a,b) => b[1] - a[1]).map(e => e[0]);
+      }, [matches, seriesId, oppClass]);
+      const c = cls(oppClass);
+      return <div>
+        {types.length > 0 && <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:7 }}>
+          {types.map(t => <Chip key={t} sel={value === t} color={c?.color || GOLD} bg={c?.bg}
+            onClick={() => onChange(value === t ? "" : t)}>{t}</Chip>)}
+        </div>}
+        <input value={value} onChange={e => onChange(e.target.value)} placeholder="デッキタイプを入力（任意）例：アグロ"
+          style={inputStyle} />
+      </div>;
+    }
+
+    function RecordTab({ matches, decks, series, saveM, notify, setTab }){
+      const [sid, setSid] = useLastSeries(series);
+      const [deckId, setDeckId] = useState(null);
+      const [oppClass, setOppClass] = useState(null);
+      const [oppType, setOppType] = useState("");
+      const [order, setOrder] = useState(null);
+
+      const sDecks = decks.filter(d => d.seriesId === sid);
+      useEffect(() => {
+        if (!deckId || !sDecks.some(d => d.id === deckId)) {
+          const last = matches.find(m => m.seriesId === sid && sDecks.some(d => d.id === m.deckId));
+          setDeckId(last ? last.deckId : (sDecks[0]?.id || null));
+        }
+      }, [sid, decks]);
+      useEffect(() => setOppType(""), [oppClass, sid]);
+
+      if (!series.length) return <Card style={{ textAlign:"center", color:GOLD, fontSize:13, padding:22 }}>
+        まず「設定」タブでシリーズを登録してください
+        <div style={{ marginTop:12 }}><button onClick={() => setTab("set")} style={btn(GOLD, "#111")}>設定へ</button></div>
+      </Card>;
+
+      const deck = decks.find(d => d.id === deckId);
+      const canSave = sid && deck && oppClass && order;
+
+      function rec(result){
+        if (!canSave) { notify("シリーズ・デッキ・相手クラス・先後を選んでください"); return; }
+        const m = { id: "m" + Date.now(), ts: new Date().toISOString(), seriesId: sid, result, order,
+          deckId: deck.id, deckName: deck.name, myClass: deck.classId, oppClass, oppType: oppType.trim() };
+        saveM([m, ...matches]);
+        notify(result === "win" ? "🏆 勝利を記録しました" : "💀 敗北を記録しました");
+        setOppClass(null); setOppType(""); setOrder(null);
+      }
+
+      const sMatches = matches.filter(m => m.seriesId === sid);
+      const deckMs = sMatches.filter(m => m.deckId === deckId);
+
+      return <div>
+        <Lbl txt="シリーズ" required />
+        <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:4, marginBottom:14 }}>
+          {series.map(s => <Chip key={s.id} sel={sid === s.id} onClick={() => setSid(s.id)}>📘 {s.name}</Chip>)}
+        </div>
+
+        <Lbl txt="自分のデッキ" required />
+        {sDecks.length === 0
+          ? <Card style={{ fontSize:12, color:"#888" }}>このシリーズにはデッキがありません。「デッキ」タブで登録してください。</Card>
+          : <div style={{ display:"flex", flexDirection:"column", gap:5, marginBottom:14 }}>
+              {sDecks.map(d => {
+                const c = cls(d.classId), sel = deckId === d.id;
+                return <button key={d.id} onClick={() => setDeckId(d.id)} style={{ display:"flex", alignItems:"center",
+                  gap:8, padding:"9px 12px", borderRadius:9, cursor:"pointer", textAlign:"left",
+                  border:`1px solid ${sel ? c.color : "#1e1e26"}`, background: sel ? c.bg : "#0f0f14",
+                  color: sel ? "#fff" : "#888", fontSize:13 }}>
+                  <span>{c.icon}</span><span style={{ flex:1 }}>{d.name}</span>
+                  {sel && <span style={{ fontSize:10, color:c.color }}>✓</span>}
+                </button>;
+              })}
+            </div>}
+
+        <Lbl txt="相手のクラス" required />
+        <ClassGrid value={oppClass} onChange={setOppClass} />
+
+        {oppClass && <div style={{ marginTop:12 }}>
+          <Lbl txt="相手のデッキタイプ" />
+          <OppTypePicker value={oppType} onChange={setOppType} oppClass={oppClass} seriesId={sid} matches={matches} />
+        </div>}
+
+        <div style={{ marginTop:14 }}><Lbl txt="先攻 / 後攻" required /></div>
+        <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+          {[["first","🟡 先攻","#d4a417"],["second","🔵 後攻","#4a7fd4"]].map(([v, l, col]) => (
+            <button key={v} onClick={() => setOrder(v)} style={{ flex:1, padding:"11px 0", borderRadius:9, cursor:"pointer",
+              fontSize:13, fontWeight:700, border:`1px solid ${order === v ? col : "#1e1e26"}`,
+              background: order === v ? col + "22" : "#0f0f14", color: order === v ? col : "#666" }}>{l}</button>
+          ))}
+        </div>
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button onClick={() => rec("win")} style={{ ...btn(canSave ? "linear-gradient(135deg,#2e7d4f,#3d9e64)" : "#1a1a22",
+            canSave ? "#fff" : "#444"), flex:1, padding:"16px 0", fontSize:16 }}>🏆 勝利</button>
+          <button onClick={() => rec("loss")} style={{ ...btn(canSave ? "linear-gradient(135deg,#8e2b22,#b03a2e)" : "#1a1a22",
+            canSave ? "#fff" : "#444"), flex:1, padding:"16px 0", fontSize:16 }}>💀 敗北</button>
+        </div>
+
+        {deck && <Card style={{ marginTop:16 }}>
+          <div style={{ fontSize:10, color:"#666", marginBottom:6 }}>このシリーズでの {deck.name}</div>
+          <div style={{ display:"flex", justifyContent:"space-between", fontSize:13 }}>
+            <span>{winsOf(deckMs)}勝{deckMs.length - winsOf(deckMs)}敗 / {deckMs.length}戦</span>
+            <WR w={winsOf(deckMs)} t={deckMs.length} />
+          </div>
+          <Bar w={winsOf(deckMs)} t={deckMs.length} />
+          {oppClass && (() => {
+            const vs = deckMs.filter(m => m.oppClass === oppClass);
+            return <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginTop:10, color:"#999" }}>
+              <span>vs {cls(oppClass).icon}{cls(oppClass).name}：{winsOf(vs)}勝{vs.length - winsOf(vs)}敗</span>
+              <WR w={winsOf(vs)} t={vs.length} size={12} />
+            </div>;
+          })()}
+        </Card>}
+      </div>;
+    }
+
+    /* ══════════════ 履歴タブ ══════════════ */
+    function HistoryTab({ matches, decks, series, saveM, notify }){
+      const [filter, setFilter] = useState("all");
+      const [editId, setEditId] = useState(null);
+      const [limit, setLimit] = useState(50);
+
+      const list = filter === "all" ? matches : filter === "none" ? matches.filter(m => !m.seriesId)
+        : matches.filter(m => m.seriesId === filter);
+      const hasNone = matches.some(m => !m.seriesId);
+
+      function del(id){
+        if (!confirm("この記録を削除しますか？")) return;
+        saveM(matches.filter(m => m.id !== id)); notify("削除しました");
+      }
+      function update(nm){
+        saveM(matches.map(m => m.id === nm.id ? nm : m)); setEditId(null); notify("記録を更新しました");
+      }
+
+      return <div>
+        <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:4, marginBottom:12 }}>
+          <Chip sel={filter === "all"} onClick={() => setFilter("all")}>すべて ({matches.length})</Chip>
+          {series.map(s => <Chip key={s.id} sel={filter === s.id} onClick={() => setFilter(s.id)}>
+            📘 {s.name} ({matches.filter(m => m.seriesId === s.id).length})</Chip>)}
+          {hasNone && <Chip sel={filter === "none"} color="#c0392b" onClick={() => setFilter("none")}>⚠ 未割当</Chip>}
+        </div>
+        {list.length === 0 && <div style={{ textAlign:"center", color:"#555", fontSize:12, padding:30 }}>記録がありません</div>}
+        {list.slice(0, limit).map(m => editId === m.id
+          ? <EditMatch key={m.id} m={m} decks={decks} series={series} matches={matches}
+              onSave={update} onCancel={() => setEditId(null)} />
+          : <MatchRow key={m.id} m={m} series={series} onEdit={() => setEditId(m.id)} onDel={() => del(m.id)} />)}
+        {list.length > limit && <button onClick={() => setLimit(limit + 50)} style={{ ...btn("#16161e", "#aaa"), width:"100%" }}>
+          さらに表示（残り{list.length - limit}件）</button>}
+      </div>;
+    }
+
+    function MatchRow({ m, series, onEdit, onDel }){
+      const my = cls(m.myClass), op = cls(m.oppClass), win = m.result === "win";
+      const s = series.find(x => x.id === m.seriesId);
+      return <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px", marginBottom:6,
+        background:"#111118", borderRadius:10, borderLeft:`3px solid ${win ? "#3d9e64" : "#b03a2e"}` }}>
+        <div style={{ fontSize:13, fontWeight:800, color: win ? "#4caf7a" : "#d0493a", width:30 }}>{win ? "WIN" : "LOSE"}</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:12, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+            {my?.icon}{m.deckName} <span style={{ color:"#555" }}>vs</span> {op?.icon}<span style={{ color:op?.color }}>{op?.name}</span>
+            {m.oppType && <span style={{ color:"#999" }}>（{m.oppType}）</span>}
+          </div>
+          <div style={{ fontSize:9, color:"#555", marginTop:3, display:"flex", gap:6 }}>
+            <span>{fmtShort(m.ts)}</span>
+            <span style={{ color: m.order === "first" ? "#d4a417" : "#4a7fd4" }}>{m.order === "first" ? "先攻" : "後攻"}</span>
+            {s ? <span style={{ color:GOLD }}>📘{s.name}</span> : <span style={{ color:"#c0392b" }}>⚠未割当</span>}
+          </div>
+        </div>
+        <button onClick={onEdit} style={{ background:"none", border:"none", color:"#666", fontSize:15, cursor:"pointer" }}>✎</button>
+        <button onClick={onDel} style={{ background:"none", border:"none", color:"#444", fontSize:15, cursor:"pointer" }}>✕</button>
+      </div>;
+    }
+
+    function EditMatch({ m, decks, series, matches, onSave, onCancel }){
+      const [f, setF] = useState({ ...m, tsLocal: fmtTs(m.ts).replace(" ", "T") });
+      const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+      const sDecks = decks.filter(d => d.seriesId === f.seriesId);
+      function submit(){
+        if (!f.seriesId) return alert("シリーズを選んでください");
+        const deck = decks.find(d => d.id === f.deckId);
+        if (!deck || deck.seriesId !== f.seriesId) return alert("このシリーズのデッキを選んでください");
+        const { tsLocal, ...rest } = f;
+        onSave({ ...rest, ts: parseTs(tsLocal.replace("T", " ")), deckName: deck.name, myClass: deck.classId, oppType: (f.oppType||"").trim() });
+      }
+      return <Card style={{ borderColor: GOLD + "66" }}>
+        <div style={{ fontSize:11, color:GOLD, marginBottom:10 }}>✎ 記録を編集</div>
+        <Lbl txt="日時" />
+        <input type="datetime-local" value={f.tsLocal} onChange={e => set("tsLocal", e.target.value)} style={{ ...inputStyle, marginBottom:10 }} />
+        <Lbl txt="シリーズ" required />
+        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:10 }}>
+          {series.map(s => <Chip key={s.id} sel={f.seriesId === s.id} onClick={() => set("seriesId", s.id)}>{s.name}</Chip>)}
+        </div>
+        <Lbl txt="自分のデッキ" required />
+        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:10 }}>
+          {sDecks.length === 0 && <span style={{ fontSize:11, color:"#888" }}>このシリーズにデッキがありません</span>}
+          {sDecks.map(d => { const c = cls(d.classId);
+            return <Chip key={d.id} sel={f.deckId === d.id} color={c.color} bg={c.bg} onClick={() => set("deckId", d.id)}>{c.icon}{d.name}</Chip>; })}
+        </div>
+        <Lbl txt="相手のクラス" required />
+        <ClassGrid value={f.oppClass} onChange={v => set("oppClass", v)} />
+        <div style={{ marginTop:10 }}><Lbl txt="相手のデッキタイプ" /></div>
+        <OppTypePicker value={f.oppType || ""} onChange={v => set("oppType", v)} oppClass={f.oppClass} seriesId={f.seriesId} matches={matches} />
+        <div style={{ display:"flex", gap:6, marginTop:10 }}>
+          {[["first","先攻"],["second","後攻"]].map(([v,l]) => <Chip key={v} sel={f.order === v} onClick={() => set("order", v)}>{l}</Chip>)}
+          <div style={{ width:10 }} />
+          {[["win","勝利","#4caf7a"],["loss","敗北","#d0493a"]].map(([v,l,c]) => <Chip key={v} sel={f.result === v} color={c} onClick={() => set("result", v)}>{l}</Chip>)}
+        </div>
+        <div style={{ display:"flex", gap:8, marginTop:14 }}>
+          <button onClick={submit} style={{ ...btn(GOLD, "#111"), flex:1 }}>保存</button>
+          <button onClick={onCancel} style={{ ...btn("#1a1a22", "#aaa"), flex:1 }}>キャンセル</button>
+        </div>
+      </Card>;
+    }
+
+    /* ══════════════ 統計タブ ══════════════ */
+    function StatsTab({ matches, series }){
+      const [filter, setFilter] = useState(() => series.length ? series[series.length-1].id : "all");
+      const [openDeck, setOpenDeck] = useState(null);
+      const [openOpp, setOpenOpp] = useState(null);
+
+      const list = filter === "all" ? matches : matches.filter(m => m.seriesId === filter);
+      const w = winsOf(list);
+      const firsts = list.filter(m => m.order === "first"), seconds = list.filter(m => m.order === "second");
+
+      const deckGroups = useMemo(() => {
+        const g = {};
+        list.forEach(m => { const k = `${m.deckName}|${m.myClass}`; (g[k] = g[k] || []).push(m); });
+        return Object.entries(g).sort((a,b) => b[1].length - a[1].length);
+      }, [list]);
+
+      const oppGroups = CLASSES.map(c => [c, list.filter(m => m.oppClass === c.id)]).filter(([, l]) => l.length);
+
+      return <div>
+        <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:4, marginBottom:14 }}>
+          <Chip sel={filter === "all"} onClick={() => setFilter("all")}>全シリーズ</Chip>
+          {series.map(s => <Chip key={s.id} sel={filter === s.id} onClick={() => setFilter(s.id)}>📘 {s.name}</Chip>)}
+        </div>
+
+        {list.length === 0 ? <div style={{ textAlign:"center", color:"#555", fontSize:12, padding:30 }}>記録がありません</div> : <>
+          {/* 総合 */}
+          <Card style={{ textAlign:"center", padding:16 }}>
+            <div style={{ fontSize:10, color:"#666" }}>総合勝率</div>
+            <div style={{ fontSize:38, fontWeight:800, color:wrColor(pct(w, list.length)), lineHeight:1.2 }}>{pct(w, list.length)}%</div>
+            <div style={{ fontSize:12, color:"#999" }}>{w}勝 {list.length - w}敗 / {list.length}戦</div>
+          </Card>
+
+          {/* 直近 */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginBottom:10 }}>
+            {[5,10,20].map(n => { const l = list.slice(0, n), lw = winsOf(l);
+              return <Card key={n} style={{ textAlign:"center", marginBottom:0, padding:10 }}>
+                <div style={{ fontSize:9, color:"#666" }}>直近{n}戦</div>
+                <WR w={lw} t={l.length} size={18} />
+                <div style={{ fontSize:9, color:"#666" }}>{lw}-{l.length - lw}</div>
+              </Card>; })}
+          </div>
+
+          {/* 先後 */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:18 }}>
+            {[["🟡 先攻", firsts], ["🔵 後攻", seconds]].map(([l, ls]) => (
+              <Card key={l} style={{ marginBottom:0 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                  <span style={{ fontSize:12 }}>{l}</span><WR w={winsOf(ls)} t={ls.length} />
+                </div>
+                <div style={{ fontSize:9, color:"#666", marginTop:3 }}>{winsOf(ls)}勝{ls.length - winsOf(ls)}敗 / {ls.length}戦</div>
+                <Bar w={winsOf(ls)} t={ls.length} />
+              </Card>
+            ))}
+          </div>
+
+          {/* デッキ別 */}
+          <Section title="🃏 デッキ別勝率" right={<span style={{ fontSize:9, color:"#555" }}>タップでマッチアップ詳細</span>}>
+            {deckGroups.map(([k, ls]) => {
+              const [name, cid] = k.split("|"); const c = cls(cid); const open = openDeck === k;
+              const f = ls.filter(m => m.order === "first"), s = ls.filter(m => m.order === "second");
+              return <Card key={k} style={{ borderColor: open ? c.color + "88" : "#1c1c24" }}>
+                <div onClick={() => setOpenDeck(open ? null : k)} style={{ cursor:"pointer" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:10, color:"#555" }}>{open ? "▼" : "▶"}</span>
+                    <span>{c?.icon}</span><span style={{ flex:1, fontSize:13 }}>{name}</span>
+                    <span style={{ fontSize:11, color:"#888" }}>{winsOf(ls)}勝{ls.length - winsOf(ls)}敗</span>
+                    <WR w={winsOf(ls)} t={ls.length} />
+                  </div>
+                  <Bar w={winsOf(ls)} t={ls.length} />
+                </div>
+                {open && <div style={{ marginTop:10 }}>
+                  <div style={{ display:"flex", gap:14, fontSize:11, color:"#999", marginBottom:10 }}>
+                    <span>🟡先攻 <WR w={winsOf(f)} t={f.length} size={11} /></span>
+                    <span>🔵後攻 <WR w={winsOf(s)} t={s.length} size={11} /></span>
+                  </div>
+                  <div style={{ fontSize:10, color:GOLD, marginBottom:6 }}>▼ 相手デッキタイプ別マッチアップ</div>
+                  <Matchups list={ls} />
+                </div>}
+              </Card>;
+            })}
+          </Section>
+
+          {/* 対戦相手別 */}
+          <Section title="🎯 対戦相手別勝率" right={<span style={{ fontSize:9, color:"#555" }}>タップで詳細</span>}>
+            {oppGroups.map(([c, ls]) => { const open = openOpp === c.id;
+              const f = ls.filter(m => m.order === "first"), s = ls.filter(m => m.order === "second");
+              return <Card key={c.id} style={{ borderColor: open ? c.color + "88" : "#1c1c24" }}>
+                <div onClick={() => setOpenOpp(open ? null : c.id)} style={{ cursor:"pointer" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:10, color:"#555" }}>{open ? "▼" : "▶"}</span>
+                    <span>{c.icon}</span><span style={{ flex:1, fontSize:13, color:c.color }}>{c.name}</span>
+                    <span style={{ fontSize:11, color:"#888" }}>{winsOf(ls)}勝{ls.length - winsOf(ls)}敗</span>
+                    <WR w={winsOf(ls)} t={ls.length} />
+                  </div>
+                  <Bar w={winsOf(ls)} t={ls.length} />
+                </div>
+                {open && <div style={{ marginTop:10 }}>
+                  <div style={{ display:"flex", gap:14, fontSize:11, color:"#999", marginBottom:8 }}>
+                    <span>🟡先攻 <WR w={winsOf(f)} t={f.length} size={11} /></span>
+                    <span>🔵後攻 <WR w={winsOf(s)} t={s.length} size={11} /></span>
+                  </div>
+                  <TypeRows list={ls} color={c.color} />
+                  <div style={{ fontSize:10, color:"#777", margin:"10px 0 5px" }}>使用デッキ別</div>
+                  {Object.entries(ls.reduce((g, m) => ((g[m.deckName] = g[m.deckName] || []).push(m), g), {}))
+                    .sort((a,b) => b[1].length - a[1].length).map(([dn, dl]) => (
+                    <div key={dn} style={{ display:"flex", justifyContent:"space-between", fontSize:12, padding:"4px 0" }}>
+                      <span>{dn}</span><span><span style={{ color:"#777", fontSize:11 }}>{winsOf(dl)}勝{dl.length - winsOf(dl)}敗 </span><WR w={winsOf(dl)} t={dl.length} size={12} /></span>
+                    </div>))}
+                </div>}
+              </Card>; })}
+          </Section>
+        </>}
+      </div>;
+    }
+
+    function TypeRows({ list, color }){
+      const g = {};
+      list.forEach(m => { const k = m.oppType || "（タイプ未入力）"; (g[k] = g[k] || []).push(m); });
+      return Object.entries(g).sort((a,b) => b[1].length - a[1].length).map(([t, ls]) => {
+        const f = ls.filter(m => m.order === "first"), s = ls.filter(m => m.order === "second");
+        return <div key={t} style={{ padding:"6px 0", borderTop:"1px solid #1a1a22" }}>
+          <div style={{ display:"flex", alignItems:"center", fontSize:12 }}>
+            <span style={{ flex:1, color }}>{t}</span>
+            <span style={{ fontSize:11, color:"#888", marginRight:6 }}>{winsOf(ls)}勝{ls.length - winsOf(ls)}敗</span>
+            <WR w={winsOf(ls)} t={ls.length} size={12} />
+          </div>
+          <div style={{ fontSize:10, color:"#777", marginTop:2, display:"flex", gap:12 }}>
+            <span>🟡 <WR w={winsOf(f)} t={f.length} size={10} /></span>
+            <span>🔵 <WR w={winsOf(s)} t={s.length} size={10} /></span>
+          </div>
+        </div>;
+      });
+    }
+
+    function Matchups({ list }){
+      return CLASSES.map(c => {
+        const ls = list.filter(m => m.oppClass === c.id);
+        if (!ls.length) return null;
+        return <div key={c.id} style={{ background:c.bg + "88", borderRadius:8, padding:"7px 10px", marginBottom:6 }}>
+          <div style={{ display:"flex", alignItems:"center", fontSize:12, fontWeight:700, marginBottom:3 }}>
+            <span style={{ flex:1, color:c.color }}>{c.icon} {c.name}</span>
+            <span style={{ fontSize:11, color:"#aaa", marginRight:6, fontWeight:400 }}>{winsOf(ls)}勝{ls.length - winsOf(ls)}敗</span>
+            <WR w={winsOf(ls)} t={ls.length} size={12} />
+          </div>
+          <TypeRows list={ls} color="#ccc" />
+        </div>;
+      });
+    }
+
+    /* ══════════════ デッキタブ ══════════════ */
+    function DecksTab({ matches, decks, series, saveD, notify, setModalImg }){
+      const [view, setView] = useState(() => series.length ? series[series.length-1].id : "all");
+      const [cid, setCid] = useState(null);
+      const [name, setName] = useState("");
+      const [img, setImg] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const fileRef = useRef();
+
+      if (!series.length) return <Card style={{ textAlign:"center", color:GOLD, fontSize:12, padding:18 }}>
+        先に「設定」タブでシリーズを登録してください</Card>;
+
+      const regTarget = series.some(s => s.id === view) ? view : null;
+      const shown = view === "all" ? decks : view === "legacy" ? decks.filter(d => !d.seriesId) : decks.filter(d => d.seriesId === view);
+      const legacyCnt = decks.filter(d => !d.seriesId).length;
+
+      async function pick(e){
+        const f = e.target.files?.[0]; if (!f) return;
+        setBusy(true);
+        try { setImg(await compress(f)); } catch { notify("画像の読み込みに失敗しました"); }
+        setBusy(false); e.target.value = "";
+      }
+      function add(){
+        if (!regTarget) return notify("登録先のシリーズを選んでください");
+        if (!cid) return notify("クラスを選んでください");
+        const n = name.trim() || cls(cid).name;
+        if (decks.some(d => d.seriesId === regTarget && d.classId === cid && d.name === n)) return notify("同じデッキが既にあります");
+        saveD([...decks, { id: "d" + Date.now(), name: n, classId: cid, seriesId: regTarget, img }]);
+        setName(""); setImg(null); setCid(null); notify("デッキを登録しました");
+      }
+      function moveDeck(id, dir){
+        const ids = shown.map(d => d.id), i = ids.indexOf(id), j = i + dir;
+        if (i < 0 || j < 0 || j >= ids.length) return;
+        const nd = [...decks];
+        const a = nd.findIndex(d => d.id === id), b = nd.findIndex(d => d.id === ids[j]);
+        [nd[a], nd[b]] = [nd[b], nd[a]];
+        saveD(nd);
+      }
+      function del(d){
+        const n = matches.filter(m => m.deckId === d.id).length;
+        if (!confirm(`「${d.name}」を削除しますか？` + (n ? `\n（このデッキの対戦記録${n}件は残ります）` : ""))) return;
+        saveD(decks.filter(x => x.id !== d.id)); notify("削除しました");
+      }
+      const patch = (id, p) => saveD(decks.map(d => d.id === id ? { ...d, ...p } : d));
+
+      return <div>
+        <Lbl txt="シリーズ" required />
+        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:14 }}>
+          {series.map(s => <Chip key={s.id} sel={view === s.id} onClick={() => setView(s.id)}>
+            📘 {s.name}（{decks.filter(d => d.seriesId === s.id).length}）</Chip>)}
+          <Chip sel={view === "all"} color="#888" onClick={() => setView("all")}>全表示</Chip>
+          {legacyCnt > 0 && <Chip sel={view === "legacy"} color="#c0392b" onClick={() => setView("legacy")}>⚠未割当（{legacyCnt}）</Chip>}
+        </div>
+
+        {regTarget && <Card>
+          <div style={{ fontSize:11, color:GOLD, marginBottom:10 }}>
+            新しいデッキを登録 <span style={{ color:"#777" }}>→ 📘{series.find(s => s.id === regTarget).name}</span>
+          </div>
+          <ClassGrid value={cid} onChange={setCid} />
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="デッキ名（例：魔手ウィッチ）"
+            style={{ ...inputStyle, marginTop:10 }} />
+          <div style={{ display:"flex", gap:8, marginTop:10, alignItems:"center" }}>
+            <input ref={fileRef} type="file" accept="image/*" onChange={pick} style={{ display:"none" }} />
+            <button onClick={() => fileRef.current.click()} style={{ ...btn("#1a1a22", "#aaa"), fontSize:12 }}>
+              {busy ? "処理中…" : img ? "🖼 画像を変更" : "🖼 スクショ添付"}</button>
+            {img && <img src={img} onClick={() => setModalImg(img)} style={{ height:38, borderRadius:5, cursor:"pointer" }} />}
+            {img && <button onClick={() => setImg(null)} style={{ background:"none", border:"none", color:"#666", cursor:"pointer" }}>✕</button>}
+            <div style={{ flex:1 }} />
+            <button onClick={add} style={btn(GOLD, "#111")}>登録</button>
+          </div>
+        </Card>}
+
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", margin:"16px 0 8px" }}>
+          <div style={{ fontSize:12, color:GOLD, fontWeight:700 }}>
+            {view === "all" ? "全デッキ" : view === "legacy" ? "⚠ 未割当デッキ" : series.find(s => s.id === view)?.name}（{shown.length}件）
+          </div>
+          {shown.length > 1 && <div style={{ fontSize:9, color:"#555" }}>💡 ▲▼ で並び替え</div>}
+        </div>
+        {shown.length === 0 && <div style={{ textAlign:"center", color:"#555", fontSize:12, padding:20 }}>デッキがありません</div>}
+        {shown.map((d, i) => <DeckRow key={d.id} d={d} series={series} matches={matches}
+          first={i === 0} last={i === shown.length - 1}
+          onUp={() => moveDeck(d.id, -1)} onDown={() => moveDeck(d.id, 1)}
+          onDel={() => del(d)} onPatch={p => patch(d.id, p)} setModalImg={setModalImg} notify={notify} />)}
+      </div>;
+    }
+
+    function DeckRow({ d, series, matches, first, last, onUp, onDown, onDel, onPatch, setModalImg, notify }){
+      const [editing, setEditing] = useState(false);
+      const [nm, setNm] = useState(d.name);
+      const fileRef = useRef();
+      const c = cls(d.classId), s = series.find(x => x.id === d.seriesId);
+      const ms = matches.filter(m => m.deckId === d.id), w = winsOf(ms);
+      const arrow = dis => ({ background:"none", border:"none", padding:"1px 4px", fontSize:10, lineHeight:1,
+        color: dis ? "#2a2a30" : "#888", cursor: dis ? "default" : "pointer" });
+      async function pick(e){
+        const f = e.target.files?.[0]; if (!f) return;
+        try { onPatch({ img: await compress(f) }); notify("画像を更新しました"); } catch { notify("画像の読み込みに失敗しました"); }
+        e.target.value = "";
+      }
+      return <div style={{ background:"#111118", border:`1px solid ${editing ? GOLD + "66" : "#1c1c24"}`,
+        borderLeft:`3px solid ${c.color}`, borderRadius:10, padding:"9px 10px", marginBottom:6 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <div style={{ display:"flex", flexDirection:"column" }}>
+            <button disabled={first} onClick={onUp} style={arrow(first)}>▲</button>
+            <button disabled={last} onClick={onDown} style={arrow(last)}>▼</button>
+          </div>
+          {d.img
+            ? <img src={d.img} onClick={() => setModalImg(d.img)} style={{ width:38, height:38, objectFit:"cover", borderRadius:6, cursor:"pointer" }} />
+            : <div style={{ width:38, height:38, borderRadius:6, background:c.bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>{c.icon}</div>}
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:13, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{d.name}</div>
+            <div style={{ fontSize:9, color:"#666", marginTop:2, display:"flex", gap:5 }}>
+              {s ? <span style={{ color:GOLD }}>📘{s.name}</span> : <span style={{ color:"#c0392b" }}>⚠ シリーズ未割当</span>}
+              <span>·</span><span>{w}勝{ms.length - w}敗 / {ms.length}戦</span>
+            </div>
+          </div>
+          <WR w={w} t={ms.length} />
+          <button onClick={() => setEditing(!editing)} style={{ background:"none", border:"none", color: editing ? GOLD : "#555", fontSize:14, cursor:"pointer" }}>✎</button>
+          <button onClick={onDel} style={{ background:"none", border:"none", color:"#444", fontSize:15, cursor:"pointer" }}>✕</button>
+        </div>
+        {editing && <div style={{ marginTop:10, paddingTop:10, borderTop:"1px solid #1a1a22" }}>
+          <div style={{ fontSize:9, color:"#666", marginBottom:5 }}>デッキ名</div>
+          <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+            <input value={nm} onChange={e => setNm(e.target.value)} style={{ ...inputStyle, padding:"7px 10px", fontSize:13 }} />
+            <button onClick={() => { if (nm.trim()) { onPatch({ name: nm.trim() }); notify("デッキ名を変更しました（過去の記録名は変わりません）"); } }}
+              style={{ ...btn(GOLD, "#111"), padding:"7px 12px", fontSize:12 }}>変更</button>
+          </div>
+          <div style={{ fontSize:9, color:"#666", marginBottom:5 }}>シリーズ変更</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:10 }}>
+            {series.map(x => <Chip key={x.id} sel={d.seriesId === x.id} onClick={() => { onPatch({ seriesId: x.id }); setEditing(false); }}>{x.name}</Chip>)}
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" onChange={pick} style={{ display:"none" }} />
+          <div style={{ display:"flex", gap:6 }}>
+            <button onClick={() => fileRef.current.click()} style={{ ...btn("#1a1a22", "#aaa"), fontSize:11, padding:"6px 10px" }}>🖼 スクショ{d.img ? "変更" : "添付"}</button>
+            {d.img && <button onClick={() => onPatch({ img: null })} style={{ ...btn("#1a1a22", "#888"), fontSize:11, padding:"6px 10px" }}>画像を外す</button>}
+          </div>
+        </div>}
+      </div>;
+    }
+
+    /* ══════════════ 設定タブ ══════════════ */
+    function SettingsTab({ matches, decks, series, saveM, saveD, saveS, notify }){
+      const [sName, setSName] = useState("");
+      const [renId, setRenId] = useState(null);
+      const [renName, setRenName] = useState("");
+      const [exportSel, setExportSel] = useState("all");
+      const [impMode, setImpMode] = useState("merge");
+      const [impResult, setImpResult] = useState(null);
+      const fileRef = useRef();
+
+      function addSeries(){
+        const n = sName.trim(); if (!n) return;
+        if (series.some(s => s.name === n)) return notify("同名のシリーズがあります");
+        saveS([...series, { id: "s" + Date.now(), name: n }]); setSName(""); notify(`シリーズ「${n}」を追加しました`);
+      }
+      function rename(id){
+        const n = renName.trim(); if (!n) return;
+        if (series.some(s => s.name === n && s.id !== id)) return notify("同名のシリーズがあります");
+        saveS(series.map(s => s.id === id ? { ...s, name: n } : s)); setRenId(null); notify("名前を変更しました");
+      }
+      function delSeries(s){
+        const mc = matches.filter(m => m.seriesId === s.id).length, dc = decks.filter(d => d.seriesId === s.id).length;
+        if (!confirm(`シリーズ「${s.name}」を削除しますか？\n紐づく対戦${mc}件・デッキ${dc}件は「未割当」になります。`)) return;
+        saveS(series.filter(x => x.id !== s.id));
+        saveM(matches.map(m => m.seriesId === s.id ? { ...m, seriesId: null } : m));
+        saveD(decks.map(d => d.seriesId === s.id ? { ...d, seriesId: null } : d));
+        notify("削除しました");
+      }
+      function moveSeries(i, dir){
+        const j = i + dir; if (j < 0 || j >= series.length) return;
+        const ns = [...series]; [ns[i], ns[j]] = [ns[j], ns[i]]; saveS(ns);
+      }
+      const exportCount = exportSel === "all" ? matches.length : exportSel === "none"
+        ? matches.filter(m => !m.seriesId).length : matches.filter(m => m.seriesId === exportSel).length;
+
+      function onFile(e){
+        const f = e.target.files?.[0]; if (!f) return;
+        if (impMode === "replace" && !confirm("現在の全データを置き換えます（デッキ画像も消えます）。よろしいですか？")) { e.target.value = ""; return; }
+        const fr = new FileReader();
+        fr.onload = () => {
+          const r = importCSV(fr.result, { matches, decks, series }, impMode);
+          if (r.error) { alert(r.error); return; }
+          saveS(r.series); saveD(r.decks); saveM(r.matches);
+          setImpResult(r); notify(`${r.added}件を取り込みました`);
+        };
+        fr.readAsText(f, "utf-8");
+        e.target.value = "";
+      }
+      function wipe(){
+        if (!confirm("全データ（戦績・デッキ・シリーズ）を削除します。よろしいですか？")) return;
+        if (!confirm("本当に削除しますか？元に戻せません。")) return;
+        saveM([]); saveD([]); saveS([]); notify("全データを削除しました");
+      }
+
+      let usage = 0; try { [MK,DK,SK].forEach(k => usage += (localStorage.getItem(k) || "").length); } catch {}
+
+      return <div>
+        <Section title="📘 シリーズ管理">
+          <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+            <input value={sName} onChange={e => setSName(e.target.value)} onKeyDown={e => e.key === "Enter" && addSeries()}
+              placeholder="例：2026年11月 / ローテ環境" style={inputStyle} />
+            <button onClick={addSeries} style={btn(GOLD, "#111")}>追加</button>
+          </div>
+          {series.length === 0 && <div style={{ fontSize:11, color:"#666" }}>シリーズを追加すると記録できるようになります</div>}
+          {series.map((s, i) => { const ms = matches.filter(m => m.seriesId === s.id), w = winsOf(ms);
+            return <div key={s.id} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px",
+              background:"#111118", borderRadius:9, marginBottom:5 }}>
+              <div style={{ display:"flex", flexDirection:"column" }}>
+                <button onClick={() => moveSeries(i, -1)} disabled={i === 0} style={{ background:"none", border:"none", fontSize:9, color: i === 0 ? "#2a2a30" : "#777", cursor:"pointer", padding:"1px 3px" }}>▲</button>
+                <button onClick={() => moveSeries(i, 1)} disabled={i === series.length-1} style={{ background:"none", border:"none", fontSize:9, color: i === series.length-1 ? "#2a2a30" : "#777", cursor:"pointer", padding:"1px 3px" }}>▼</button>
+              </div>
+              {renId === s.id
+                ? <><input value={renName} onChange={e => setRenName(e.target.value)} style={{ ...inputStyle, padding:"6px 9px", fontSize:13 }} />
+                    <button onClick={() => rename(s.id)} style={{ ...btn(GOLD, "#111"), padding:"6px 10px", fontSize:11 }}>OK</button></>
+                : <><div style={{ flex:1 }}>
+                      <div style={{ fontSize:13 }}>📘 {s.name}</div>
+                      <div style={{ fontSize:9, color:"#666" }}>{ms.length}戦 {w}勝{ms.length - w}敗 · デッキ{decks.filter(d => d.seriesId === s.id).length}</div>
+                    </div>
+                    <WR w={w} t={ms.length} size={12} />
+                    <button onClick={() => { setRenId(s.id); setRenName(s.name); }} style={{ background:"none", border:"none", color:"#666", cursor:"pointer" }}>✎</button>
+                    <button onClick={() => delSeries(s)} style={{ background:"none", border:"none", color:"#444", cursor:"pointer" }}>✕</button></>}
+            </div>; })}
+        </Section>
+
+        <Section title="📤 CSV出力">
+          <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:10 }}>
+            <Chip sel={exportSel === "all"} onClick={() => setExportSel("all")}>全件（{matches.length}）</Chip>
+            {series.map(s => <Chip key={s.id} sel={exportSel === s.id} onClick={() => setExportSel(s.id)}>
+              {s.name}（{matches.filter(m => m.seriesId === s.id).length}）</Chip>)}
+            {matches.some(m => !m.seriesId) && <Chip sel={exportSel === "none"} color="#c0392b" onClick={() => setExportSel("none")}>
+              未指定（{matches.filter(m => !m.seriesId).length}）</Chip>}
+          </div>
+          <button disabled={!exportCount} onClick={() => { const n = downloadCSV(matches, series, exportSel); notify(`${n}件を出力しました`); }}
+            style={{ ...btn(exportCount ? "#2a2a38" : "#16161e", exportCount ? GOLD : "#444"), width:"100%" }}>
+            ⬇ CSVをダウンロード（{exportCount}件）</button>
+          <div style={{ fontSize:9, color:"#555", marginTop:6 }}>UTF-8 BOM付き（Excelで文字化けしません）</div>
+        </Section>
+
+        <Section title="📥 CSV取り込み">
+          <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+            <Chip sel={impMode === "merge"} onClick={() => setImpMode("merge")}>➕ 追加（重複はスキップ）</Chip>
+            <Chip sel={impMode === "replace"} color="#c0392b" onClick={() => setImpMode("replace")}>♻ 置き換え</Chip>
+          </div>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" onChange={onFile} style={{ display:"none" }} />
+          <button onClick={() => fileRef.current.click()} style={{ ...btn("#2a2a38", GOLD), width:"100%" }}>📂 CSVファイルを選択</button>
+          <div style={{ fontSize:9, color:"#555", marginTop:6 }}>このアプリで出力したCSVに対応。シリーズ・デッキは自動で再生成されます。</div>
+          {impResult && <Card style={{ marginTop:10, fontSize:11, color:"#aaa" }}>
+            取り込み {impResult.added}件 / 重複スキップ {impResult.skipped}件<br />
+            新規シリーズ {impResult.newS}件 / 新規デッキ {impResult.newD}件
+            {impResult.errors.length > 0 && <div style={{ color:"#d0493a", marginTop:6 }}>
+              エラー {impResult.errors.length}件：{impResult.errors.slice(0, 5).join(" / ")}</div>}
+          </Card>}
+        </Section>
+
+        <Section title="🗑 データ管理">
+          <div style={{ fontSize:10, color:"#666", marginBottom:8 }}>
+            戦績 {matches.length}件 · デッキ {decks.length}件 · シリーズ {series.length}件 · 使用量 約{(usage / 1024 / 1024 * 2).toFixed(2)}MB
+          </div>
+          <button onClick={wipe} style={{ ...btn("#2a1010", "#d0493a"), width:"100%" }}>全データを削除</button>
+        </Section>
+
+        <div style={{ textAlign:"center", fontSize:9, color:"#444", marginTop:20, lineHeight:1.8 }}>
+          <div>📦 PWA版 v{APP_VER}</div>
+          <div>Shadowverse は Cygames の商標です</div>
+        </div>
+      </div>;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
